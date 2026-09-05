@@ -1,0 +1,17 @@
+node_modules
+dist
+dist-electron
+release
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+.vscode
+.idea
+coverage
+dev-dist
+tmp-test
+repair-home.png
+repair-with-images.png
+
