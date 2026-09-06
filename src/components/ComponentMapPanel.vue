@@ -3,14 +3,21 @@
     <div class="toolbar" style="margin-top: 0">
       <el-input :model-value="title" size="small" placeholder="标注图标题" style="width: 220px" @update:model-value="$emit('update:title', $event)" />
       <div class="map-actions">
-        <el-button size="small" :loading="generating" @click="$emit('generate')">重新生成</el-button>
+        <el-button
+          size="small"
+          class="regen-btn"
+          :disabled="generating"
+          @click="!generating && $emit('generate')"
+        >
+          {{ generating ? '正在生成' : '重新生成' }}
+        </el-button>
         <el-button size="small" @click="addLabel">添加文字</el-button>
         <el-button size="small" type="primary" :disabled="!imageUrl" @click="downloadPng">下载图片</el-button>
         <el-button size="small" text @click="$emit('close')">关闭</el-button>
       </div>
     </div>
     <p class="page-desc">
-      底图为上传的电路板正面实拍，不会被改画。每次生成后都会复查是否标全、文字与箭头位置是否准确，并把文字排开避免重叠。
+      底图为上传的电路板正面实拍，不会被改画或重绘。自动生成优先：YOLOv11 只定位包围框 → Qwen-VL 识别裁剪小图名称 → OpenCV 把红箭头和白描边文字叠到副本并写入 pcb_annotate/output。界面仍可拖动圆点微调箭头、拖动文字改位置。
       <span v-if="statusText"> {{ statusText }}</span>
       <span v-else-if="labels.length"> 当前 {{ labels.length }} 个标注</span>
     </p>
@@ -28,15 +35,17 @@
       <el-button size="small" type="danger" text @click="removeSelected">删除</el-button>
     </div>
 
+    <div class="map-stage-wrap">
     <div ref="stageRef" class="map-stage">
       <div v-if="imageUrl" ref="frameRef" class="map-frame">
         <img
           ref="imgRef"
           class="map-base"
-          :src="imageUrl"
+          :src="displaySrc"
           alt="电路板标注底图"
           draggable="false"
           @load="onImageLoad"
+          @error="onImageError"
         />
         <svg class="map-svg" :viewBox="`0 0 ${box.w} ${box.h}`" preserveAspectRatio="none">
           <line
@@ -85,12 +94,18 @@
       </div>
       <div v-else class="map-empty">请先在左侧上传电路板正面图</div>
     </div>
+    <div v-if="generating" class="map-loading" role="status" aria-live="polite">
+      <el-icon class="is-loading map-loading-icon"><Loading /></el-icon>
+      <span>{{ statusText || '正在生成标注…' }}</span>
+    </div>
+    </div>
   </section>
 </template>
 
 <script setup>
-import { computed, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Loading } from '@element-plus/icons-vue'
 
 const props = defineProps({
   imageUrl: { type: String, default: '' },
@@ -101,12 +116,65 @@ const props = defineProps({
   labels: { type: Array, default: () => [] }
 })
 
-const emit = defineEmits(['generate', 'close', 'update:labels', 'update:title'])
+const emit = defineEmits(['generate', 'close', 'update:labels', 'update:title', 'select'])
 
 const stageRef = ref(null)
 const frameRef = ref(null)
 const imgRef = ref(null)
+const displaySrc = ref('')
 const selectedIndex = ref(-1)
+let objectUrl = ''
+
+function revokeObjectUrl() {
+  if (objectUrl) {
+    URL.revokeObjectURL(objectUrl)
+    objectUrl = ''
+  }
+}
+
+function base64ToBytes(b64) {
+  const bin = atob(b64)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i)
+  return bytes
+}
+
+function toDisplaySrc(src) {
+  revokeObjectUrl()
+  if (!src) return ''
+  if (!String(src).startsWith('data:')) return src
+  try {
+    const match = String(src).match(/^data:([^;,]+)?(;base64)?,(.*)$/s)
+    if (!match) return src
+    const mime = match[1] || 'image/jpeg'
+    const payload = match[3] || ''
+    const bytes = match[2]?.includes('base64')
+      ? base64ToBytes(payload)
+      : new TextEncoder().encode(decodeURIComponent(payload))
+    objectUrl = URL.createObjectURL(new Blob([bytes], { type: mime }))
+    return objectUrl
+  } catch {
+    return src
+  }
+}
+
+watch(
+  () => props.imageUrl,
+  (src) => {
+    displaySrc.value = toDisplaySrc(src)
+  },
+  { immediate: true }
+)
+
+let resizeObserver = null
+onMounted(() => {
+  resizeObserver = new ResizeObserver(() => syncBox())
+  if (stageRef.value) resizeObserver.observe(stageRef.value)
+})
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect()
+  revokeObjectUrl()
+})
 const box = reactive({ w: 1, h: 1 })
 const drag = reactive({
   active: false,
@@ -116,6 +184,14 @@ const drag = reactive({
 
 const selected = computed(() =>
   selectedIndex.value >= 0 ? props.labels[selectedIndex.value] : null
+)
+
+watch(
+  selected,
+  (item) => {
+    emit('select', item || null)
+  },
+  { deep: true }
 )
 
 function clamp(n) {
@@ -134,11 +210,26 @@ function onImageLoad() {
   syncBox()
 }
 
+function onImageError() {
+  if (displaySrc.value !== props.imageUrl && props.imageUrl) {
+    displaySrc.value = props.imageUrl
+    return
+  }
+  ElMessage.warning('电路板底图无法显示，请返回上传页确认正面图')
+}
+
 function syncBox() {
-  const el = imgRef.value || frameRef.value
-  if (!el) return
-  box.w = el.clientWidth || 1
-  box.h = el.clientHeight || 1
+  const img = imgRef.value
+  if (!img) return
+  if (img.clientWidth < 8 && img.naturalWidth > 8) {
+    const stageW = stageRef.value?.clientWidth || 900
+    const stageH = Math.min(window.innerHeight * 0.68, 680)
+    const scale = Math.min(stageW / img.naturalWidth, stageH / img.naturalHeight, 1)
+    img.style.width = `${Math.max(8, Math.round(img.naturalWidth * scale))}px`
+    img.style.height = `${Math.max(8, Math.round(img.naturalHeight * scale))}px`
+  }
+  box.w = img.clientWidth || img.naturalWidth || 1
+  box.h = img.clientHeight || img.naturalHeight || 1
 }
 
 function labelStyle(item) {
@@ -307,6 +398,21 @@ defineExpose({ syncBox })
   flex-wrap: wrap;
 }
 
+.regen-btn.is-disabled,
+.regen-btn:disabled {
+  color: var(--muted) !important;
+  cursor: not-allowed;
+}
+
+.map-stage-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 420px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .edit-bar {
   display: flex;
   align-items: center;
@@ -326,7 +432,8 @@ defineExpose({ syncBox })
 .map-stage {
   position: relative;
   flex: 1;
-  min-height: 420px;
+  min-height: 0;
+  min-width: 0;
   background: #0c1220;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -336,19 +443,48 @@ defineExpose({ syncBox })
   justify-content: center;
 }
 
+.map-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  border-radius: 12px;
+  background: rgba(8, 14, 28, 0.62);
+  color: #e8eefc;
+  font-size: 14px;
+  text-align: center;
+  padding: 16px;
+  pointer-events: all;
+}
+
+.map-loading-icon {
+  font-size: 42px;
+  color: #7eb6ff;
+}
+
 .map-frame {
   position: relative;
   display: inline-block;
   max-width: 100%;
-  max-height: 100%;
+  line-height: 0;
+  background: transparent;
 }
 
 .map-base {
   display: block;
+  width: auto;
+  height: auto;
   max-width: 100%;
-  max-height: min(72vh, 760px);
+  max-height: min(68vh, 720px);
+  object-fit: contain;
+  vertical-align: top;
   user-select: none;
   pointer-events: none;
+  background: transparent;
 }
 
 .map-svg {
@@ -356,6 +492,8 @@ defineExpose({ syncBox })
   inset: 0;
   width: 100%;
   height: 100%;
+  background: transparent;
+  overflow: visible;
 }
 
 .handle {

@@ -77,8 +77,8 @@
       </section>
     </div>
 
-    <div class="toolbar">
-      <div>
+    <div class="toolbar upload-toolbar">
+      <div class="upload-toolbar-meta">
         当前模型：<strong>{{ providerName }}</strong>
         <span class="page-desc" style="margin-left: 12px">
           知识库：
@@ -94,9 +94,14 @@
           </template>
         </span>
       </div>
-      <div>
-        <el-button :disabled="!frontUrl" :loading="savingMaterials" @click="saveUploadsToMaterials">
-          保存到素材
+      <div class="upload-toolbar-actions">
+        <el-button
+          :disabled="!canSaveToMaterials"
+          :loading="savingMaterials"
+          :title="saveToMaterialsHint"
+          @click="saveUploadsToMaterials"
+        >
+          保存到素材库
         </el-button>
         <el-button :loading="mapLoading" @click="openComponentMap">元件标注图</el-button>
         <el-button type="primary" :loading="loading" @click="startAnalyze">开始识别</el-button>
@@ -104,8 +109,8 @@
     </div>
     </div>
 
-    <div v-show="activeTab === 'annotate'" class="tab-panel-body">
-      <div class="panel map-tab-panel">
+    <div v-if="activeTab === 'annotate'" class="tab-panel-body annotate-split-page">
+      <div class="panel map-tab-panel annotate-left">
         <ComponentMapPanel
           :image-url="frontUrl"
           :generating="mapLoading"
@@ -115,8 +120,10 @@
           :divider-y="mapDividerY"
           @generate="generateComponentMap"
           @close="activeTab = 'upload'"
+          @select="onMapSelect"
         />
       </div>
+      <ScopeMeterPanel class="annotate-right" :selected-label="selectedComponentText" />
     </div>
 
     <div v-show="activeTab === 'analyze'">
@@ -206,7 +213,7 @@
       append-to-body
       destroy-on-close
     >
-      <el-input v-model="pickerKeyword" placeholder="搜索素材标题" clearable style="margin-bottom: 12px" />
+      <el-input v-model="pickerKeyword" placeholder="搜索标题" clearable style="margin-bottom: 12px" />
       <div v-if="pickerList.length" class="picker-grid">
         <article
           v-for="item in pickerList"
@@ -218,14 +225,14 @@
           <span>{{ item.title }}</span>
         </article>
       </div>
-      <p v-else class="page-desc">暂无素材。请先到「查找」中保存图片到素材库。</p>
+      <p v-else class="page-desc">素材库为空。请先到「查找」中保存图片到素材库。</p>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useSettingsStore } from '@/stores/settings'
 import { useRepairStore } from '@/stores/repair'
@@ -233,8 +240,10 @@ import { useKnowledgeStore } from '@/stores/knowledge'
 import { coverSrc, useMaterialsStore } from '@/stores/materials'
 import { getProvider } from '@/services/providers'
 import { analyzeBoard, annotateComponentsUntilComplete } from '@/services/ai'
+import { runPcbAnnotatePipeline } from '@/utils/pcbAnnotate'
 import { buildKnowledgeContext, retrieveChunks } from '@/services/rag'
 import ComponentMapPanel from '@/components/ComponentMapPanel.vue'
+import ScopeMeterPanel from '@/components/ScopeMeterPanel.vue'
 import { ALL_BRAND_VALUE } from '@/data/pcbIconCatalog'
 import {
   compressImage,
@@ -245,8 +254,33 @@ import {
 } from '@/utils/files'
 
 const router = useRouter()
+const route = useRoute()
 const settings = useSettingsStore()
 const repairStore = useRepairStore()
+const frontUrl = computed({
+  get: () => repairStore.frontUrl || '',
+  set: (value) => {
+    repairStore.frontUrl = value || ''
+  }
+})
+const backUrl = computed({
+  get: () => repairStore.backUrl || '',
+  set: (value) => {
+    repairStore.backUrl = value || ''
+  }
+})
+const schematicUrl = computed({
+  get: () => repairStore.schematicUrl || '',
+  set: (value) => {
+    repairStore.schematicUrl = value || ''
+  }
+})
+const sourceMaterialId = computed({
+  get: () => repairStore.sourceMaterialId || '',
+  set: (value) => {
+    repairStore.sourceMaterialId = value || ''
+  }
+})
 const knowledge = useKnowledgeStore()
 const materials = useMaterialsStore()
 const pickerOpen = ref(false)
@@ -256,17 +290,31 @@ const savingMaterials = ref(false)
 const loading = ref(false)
 const activeTab = ref('upload')
 const useKnowledge = ref(true)
-const frontUrl = ref('')
-const backUrl = ref('')
-const schematicUrl = ref('')
 const result = ref(null)
 const mapLoading = ref(false)
 const mapStatus = ref('')
 const mapTitle = ref('一张图看懂电路板')
 const mapDividerY = ref(null)
 const mapLabels = ref([])
+const selectedComponentText = ref('')
+
+function onMapSelect(item) {
+  selectedComponentText.value = item?.text ? String(item.text) : ''
+}
 
 const providerName = computed(() => getProvider(settings.currentProvider).name)
+const canSaveToMaterials = computed(
+  () =>
+    Boolean(frontUrl.value && backUrl.value && schematicUrl.value && !sourceMaterialId.value)
+)
+
+const saveToMaterialsHint = computed(() => {
+  if (sourceMaterialId.value) return '已从素材库载入，无需再保存'
+  if (!frontUrl.value || !backUrl.value || !schematicUrl.value) {
+    return '请同时上传正面图、反面图和原理图后再保存'
+  }
+  return '保存到素材库'
+})
 
 const pickerTitle = computed(() => {
   if (pickerSlot.value === 'back') return '从素材库选择反面图'
@@ -282,8 +330,64 @@ const pickerList = computed(() => {
 
 onMounted(() => {
   knowledge.load().catch(() => {})
-  materials.load().catch(() => {})
+  materials.load()
+    .then(async () => {
+      if (route.query.material) await applyIncomingMaterial()
+      else repairStore.setBoard({ sourceMaterialId: '' })
+    })
+    .catch(() => {})
 })
+
+watch(
+  () => route.query.material,
+  (id, prev) => {
+    if (id && id !== prev) applyIncomingMaterial()
+  }
+)
+
+async function maybeCompress(src) {
+  if (!src) return ''
+  if (src.startsWith('data:image') && !src.includes('svg')) {
+    try {
+      return await compressImage(src)
+    } catch {
+      return src
+    }
+  }
+  return src
+}
+
+async function applyIncomingMaterial() {
+  const id = route.query.material
+  if (!id) return
+  if (!materials.loaded) {
+    try {
+      await materials.load()
+    } catch {
+      ElMessage.error('本地素材库读取失败')
+      return
+    }
+  }
+  const item = materials.items.find((row) => row.id === String(id))
+  if (!item) {
+    ElMessage.warning('未找到对应条目')
+    return
+  }
+  if (!item.front && !item.back && !item.schematic) {
+    ElMessage.warning('该条目没有可用图片')
+    return
+  }
+  repairStore.setBoard({
+    front: item.front || '',
+    back: item.back || '',
+    schematic: item.schematic || '',
+    sourceMaterialId: item.id
+  })
+  mapLabels.value = []
+  activeTab.value = 'upload'
+  ElMessage.success('已载入素材库图片')
+  router.replace({ name: 'repair' })
+}
 
 async function onImageChange(side, uploadFile) {
   const file = uploadFile.raw
@@ -343,17 +447,10 @@ function openMaterialPicker(slot) {
 async function applyMaterial(item) {
   const src = materialSrc(item)
   if (!src) {
-    ElMessage.warning('该素材没有可用图片')
+    ElMessage.warning('该条目没有可用图片')
     return
   }
-  let next = src
-  if (src.startsWith('data:image') && !src.includes('svg')) {
-    try {
-      next = await compressImage(src)
-    } catch {
-      next = src
-    }
-  }
+  let next = await maybeCompress(src)
   if (pickerSlot.value === 'front') {
     frontUrl.value = next
     mapLabels.value = []
@@ -367,12 +464,25 @@ async function applyMaterial(item) {
 }
 
 async function saveUploadsToMaterials() {
-  if (!frontUrl.value) {
-    ElMessage.warning('请先上传或选择正面图')
+  if (!canSaveToMaterials.value) {
+    ElMessage.warning('请先上传正面图、反面图和原理图')
     return
   }
   savingMaterials.value = true
   try {
+    if (sourceMaterialId.value) {
+      const result = await materials.updateBoardSet(sourceMaterialId.value, {
+        front: frontUrl.value,
+        back: backUrl.value,
+        schematic: schematicUrl.value
+      })
+      if (result?.missing) {
+        repairStore.setBoard({ sourceMaterialId: '' })
+      } else {
+        ElMessage.success('已保存到素材库')
+        return
+      }
+    }
     const result = await materials.addBoardSet({
       title: '维修识别素材',
       front: frontUrl.value,
@@ -385,8 +495,11 @@ async function saveUploadsToMaterials() {
         extra: ''
       }
     })
-    if (result.duplicated) ElMessage.info('该组图片已在素材中')
-    else ElMessage.success('已保存到素材文件夹')
+    if (result.duplicated) ElMessage.info('该组图片已在素材库中')
+    else {
+      repairStore.setBoard({ sourceMaterialId: result.id || '' })
+      ElMessage.success('已保存到素材库')
+    }
   } catch (error) {
     ElMessage.error(error.message || '保存失败')
   } finally {
@@ -469,6 +582,26 @@ async function generateComponentMap() {
   mapLoading.value = true
   mapStatus.value = '准备生成全量标注…'
   try {
+    mapStatus.value = 'YOLOv11 定位元件，再逐个用视觉模型命名…'
+    const pipeline = await runPcbAnnotatePipeline({
+      image: frontUrl.value,
+      apiKey: settings.currentKey
+    }).catch((error) => ({ ok: false, error: error.message }))
+
+    if (pipeline?.ok && pipeline.labels?.length) {
+      mapTitle.value = '一张图看懂电路板'
+      mapDividerY.value = null
+      mapLabels.value = normalizeLabels(pipeline.labels)
+      const skipTip = pipeline.skipped ? `，跳过 ${pipeline.skipped} 项` : ''
+      const outTip = pipeline.output ? `。OpenCV 成品：${pipeline.output}` : ''
+      mapStatus.value = `YOLO 检出 ${pipeline.detected}，已标注 ${mapLabels.value.length}${skipTip}${outTip}`
+      ElMessage.success(`已按检测框叠加红箭头标注 ${mapLabels.value.length} 项，底图未改画`)
+      return
+    }
+
+    mapStatus.value = pipeline?.error
+      ? `YOLO 流水线不可用（${pipeline.error}），改用全图视觉标注…`
+      : 'YOLO 流水线无结果，改用全图视觉标注…'
     const images = [frontUrl.value]
     if (backUrl.value) images.push(backUrl.value)
     if (schematicUrl.value) images.push(schematicUrl.value)
@@ -489,8 +622,8 @@ async function generateComponentMap() {
     mapDividerY.value = typeof data.dividerY === 'number' ? data.dividerY : null
     mapLabels.value = normalizeLabels(data.labels)
     const tip = data.complete
-      ? `复查通过：标注完成且位置已校正，文字已避让，共 ${mapLabels.value.length} 项`
-      : `已标注 ${mapLabels.value.length} 项并完成多轮质检，请再核对箭头是否指在元件上`
+      ? `复查通过：名称与箭头位置已核对，文字已避让，共 ${mapLabels.value.length} 项`
+      : `已标注 ${mapLabels.value.length} 项并完成多轮名称与箭头复查，请再核对箭头是否指在对应元件中心`
     ElMessage.success(tip)
   } catch (error) {
     ElMessageBox.alert(error.message || '标注生成失败', '生成失败', {
@@ -613,11 +746,73 @@ async function startAnalyze() {
   height: calc(100vh - 140px);
 }
 
+.annotate-split-page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 12px;
+  height: calc(100vh - 132px);
+  min-height: 560px;
+  align-items: stretch;
+}
+
+.annotate-split-page.tab-panel-body,
+.annotate-split-page .map-tab-panel {
+  min-height: 0;
+  height: 100%;
+}
+
+.annotate-left,
+.annotate-right {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+@media (max-width: 1100px) {
+  .annotate-split-page {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 0;
+  }
+
+  .annotate-split-page .map-tab-panel {
+    height: min(70vh, 720px);
+    min-height: 420px;
+  }
+
+  .annotate-right {
+    min-height: 520px;
+  }
+}
+
 .upload-actions {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.upload-toolbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 8;
+  background: var(--bg);
+  padding-top: 12px;
+  padding-bottom: 8px;
+}
+
+.upload-toolbar-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.upload-toolbar-actions {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+  position: relative;
+  z-index: 9;
 }
 
 .picker-grid {
