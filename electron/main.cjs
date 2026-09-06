@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, shell } = require('electron')
 const path = require('path')
+const materialFolder = require('./materialFolder.cjs')
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -31,6 +32,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  materialFolder.ensureRoot()
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -39,6 +41,34 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+ipcMain.handle('materials-info', async () => materialFolder.info())
+ipcMain.handle('materials-save', async (_event, payload) => {
+  try {
+    return materialFolder.saveSet(payload)
+  } catch (error) {
+    return { ok: false, error: error.message || '写入素材文件夹失败' }
+  }
+})
+ipcMain.handle('materials-meta', async (_event, payload) => {
+  try {
+    return materialFolder.updateMeta(payload)
+  } catch (error) {
+    return { ok: false, error: error.message || '更新素材文件夹失败' }
+  }
+})
+ipcMain.handle('materials-remove', async (_event, id) => {
+  try {
+    return materialFolder.removeSet(id)
+  } catch (error) {
+    return { ok: false, error: error.message || '删除素材文件夹失败' }
+  }
+})
+ipcMain.handle('materials-open', async () => {
+  const root = materialFolder.ensureRoot()
+  const err = await shell.openPath(root)
+  return { ok: !err, error: err || '', root }
 })
 
 ipcMain.handle('ai-request', async (_event, payload) => {

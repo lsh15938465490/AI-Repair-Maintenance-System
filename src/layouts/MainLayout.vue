@@ -9,7 +9,10 @@
         </h1>
       </div>
       <router-link class="nav-item" to="/repair">维修识别</router-link>
+      <router-link class="nav-item" to="/knowledge">知识库</router-link>
+      <router-link class="nav-item" to="/materials">素材</router-link>
       <router-link class="nav-item" to="/settings">系统设置</router-link>
+      <router-link class="nav-item" to="/search">查找</router-link>
     </aside>
     <main class="content">
       <router-view />

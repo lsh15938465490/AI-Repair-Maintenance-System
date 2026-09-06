@@ -3,6 +3,7 @@ import { encryptText, decryptText } from '@/utils/crypto'
 import { PROVIDERS } from '@/services/providers'
 
 const STORAGE_KEY = 'ai-pcb-repair-settings-v1'
+const DEFAULT_PROVIDER = PROVIDERS[0].id
 
 function emptyKeys() {
   return PROVIDERS.reduce((acc, item) => {
@@ -13,7 +14,7 @@ function emptyKeys() {
 
 function loadState() {
   const defaults = {
-    currentProvider: 'qwen',
+    currentProvider: DEFAULT_PROVIDER,
     apiKeys: emptyKeys()
   }
   const raw = localStorage.getItem(STORAGE_KEY)
@@ -25,7 +26,9 @@ function loadState() {
       apiKeys[id] = decryptText(parsed.apiKeys?.[id] || '')
     })
     return {
-      currentProvider: parsed.currentProvider || 'qwen',
+      currentProvider: PROVIDERS.some((item) => item.id === parsed.currentProvider)
+        ? parsed.currentProvider
+        : DEFAULT_PROVIDER,
       apiKeys
     }
   } catch {
@@ -54,7 +57,7 @@ export const useSettingsStore = defineStore('settings', {
       this.persist()
     },
     reset() {
-      this.currentProvider = 'qwen'
+      this.currentProvider = DEFAULT_PROVIDER
       this.apiKeys = emptyKeys()
       localStorage.removeItem(STORAGE_KEY)
     }

@@ -17,6 +17,7 @@
     "@element-plus/icons-vue": "^2.3.1",
     "crypto-js": "^4.2.0",
     "element-plus": "^2.8.8",
+    "mammoth": "^1.12.2",
     "pdfjs-dist": "^4.8.69",
     "pinia": "^2.2.6",
     "vue": "^3.5.13",
