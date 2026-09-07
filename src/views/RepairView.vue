@@ -7,10 +7,11 @@
         <el-tab-pane label="图片上传" name="upload" />
         <el-tab-pane label="元件标注图" name="annotate" />
         <el-tab-pane label="开始识别" name="analyze" />
+        <el-tab-pane label="示波万用表" name="meter" />
       </el-tabs>
     </div>
 
-    <div v-show="activeTab === 'upload'">
+    <div v-show="activeTab === 'upload'" class="tab-scroll">
     <p class="page-desc">上传电路板正面实拍图（必填），反面与原理图选填。识别前将校验图片与 API 配置。</p>
 
     <div class="upload-grid">
@@ -109,8 +110,8 @@
     </div>
     </div>
 
-    <div v-if="activeTab === 'annotate'" class="tab-panel-body annotate-split-page">
-      <div class="panel map-tab-panel annotate-left">
+    <div v-if="activeTab === 'annotate'" class="tab-panel-body">
+      <div class="panel map-tab-panel">
         <ComponentMapPanel
           :image-url="frontUrl"
           :generating="mapLoading"
@@ -123,17 +124,25 @@
           @select="onMapSelect"
         />
       </div>
-      <ScopeMeterPanel class="annotate-right" :selected-label="selectedComponentText" />
     </div>
 
-    <div v-show="activeTab === 'analyze'">
-      <p class="page-desc">根据已上传图片与当前模型进行故障识别，结果在本页展示。</p>
-      <div class="toolbar">
-        <div>
-          当前模型：<strong>{{ providerName }}</strong>
+    <div v-if="activeTab === 'meter'" class="tab-panel-body">
+      <p class="page-desc">外接示波万用表数据展示。可与「元件标注图」中选中的元件对照查看实时读数。</p>
+      <ScopeMeterPanel class="meter-tab-panel" :selected-label="selectedComponentText" />
+    </div>
+
+    <div v-show="activeTab === 'analyze'" class="analyze-page">
+      <div class="analyze-head">
+        <p class="page-desc">根据已上传图片与当前模型进行故障识别，结果在本页展示。</p>
+        <div class="toolbar">
+          <div>
+            当前模型：<strong>{{ providerName }}</strong>
+          </div>
+          <el-button type="primary" :loading="loading" @click="startAnalyze">开始识别</el-button>
         </div>
-        <el-button type="primary" :loading="loading" @click="startAnalyze">开始识别</el-button>
       </div>
+
+      <div class="analyze-body">
 
       <section v-if="result" class="panel">
         <div class="toolbar">
@@ -203,6 +212,7 @@
         </div>
         <p v-else class="page-desc">暂无记录，识别成功后会保存在当前浏览器/桌面应用本地。</p>
       </section>
+      </div>
     </div>
     </div>
 
@@ -240,6 +250,7 @@ import { useKnowledgeStore } from '@/stores/knowledge'
 import { coverSrc, useMaterialsStore } from '@/stores/materials'
 import { getProvider } from '@/services/providers'
 import { analyzeBoard, annotateComponentsUntilComplete } from '@/services/ai'
+import { layoutLabelsNoOverlap } from '@/services/annotationLayout'
 import { runPcbAnnotatePipeline } from '@/utils/pcbAnnotate'
 import { buildKnowledgeContext, retrieveChunks } from '@/services/rag'
 import ComponentMapPanel from '@/components/ComponentMapPanel.vue'
@@ -305,13 +316,15 @@ function onMapSelect(item) {
 const providerName = computed(() => getProvider(settings.currentProvider).name)
 const canSaveToMaterials = computed(
   () =>
-    Boolean(frontUrl.value && backUrl.value && schematicUrl.value && !sourceMaterialId.value)
+    Boolean(repairStore.fromLocalUpload && (frontUrl.value || backUrl.value || schematicUrl.value))
 )
 
 const saveToMaterialsHint = computed(() => {
-  if (sourceMaterialId.value) return '已从素材库载入，无需再保存'
-  if (!frontUrl.value || !backUrl.value || !schematicUrl.value) {
-    return '请同时上传正面图、反面图和原理图后再保存'
+  if (!repairStore.fromLocalUpload) {
+    return '请通过「上传正面图 / 反面图 / 原理图」上传后再保存；从素材库进入不可保存'
+  }
+  if (!frontUrl.value && !backUrl.value && !schematicUrl.value) {
+    return '请先上传正面图、反面图或原理图'
   }
   return '保存到素材库'
 })
@@ -381,7 +394,8 @@ async function applyIncomingMaterial() {
     front: item.front || '',
     back: item.back || '',
     schematic: item.schematic || '',
-    sourceMaterialId: item.id
+    sourceMaterialId: item.id,
+    fromLocalUpload: false
   })
   mapLabels.value = []
   activeTab.value = 'upload'
@@ -403,6 +417,7 @@ async function onImageChange(side, uploadFile) {
       frontUrl.value = compressed
       mapLabels.value = []
     } else backUrl.value = compressed
+    repairStore.setBoard({ sourceMaterialId: '', fromLocalUpload: true })
   } catch {
     ElMessage.warning('当前浏览器无法解析该图片格式，请换一张后再试')
   }
@@ -421,6 +436,7 @@ async function onSchematicChange(uploadFile) {
   } else {
     schematicUrl.value = await compressImage(await fileToDataUrl(file))
   }
+  repairStore.setBoard({ sourceMaterialId: '', fromLocalUpload: true })
 }
 
 function clearBack() {
@@ -465,24 +481,11 @@ async function applyMaterial(item) {
 
 async function saveUploadsToMaterials() {
   if (!canSaveToMaterials.value) {
-    ElMessage.warning('请先上传正面图、反面图和原理图')
+    ElMessage.warning(saveToMaterialsHint.value)
     return
   }
   savingMaterials.value = true
   try {
-    if (sourceMaterialId.value) {
-      const result = await materials.updateBoardSet(sourceMaterialId.value, {
-        front: frontUrl.value,
-        back: backUrl.value,
-        schematic: schematicUrl.value
-      })
-      if (result?.missing) {
-        repairStore.setBoard({ sourceMaterialId: '' })
-      } else {
-        ElMessage.success('已保存到素材库')
-        return
-      }
-    }
     const result = await materials.addBoardSet({
       title: '维修识别素材',
       front: frontUrl.value,
@@ -497,7 +500,7 @@ async function saveUploadsToMaterials() {
     })
     if (result.duplicated) ElMessage.info('该组图片已在素材库中')
     else {
-      repairStore.setBoard({ sourceMaterialId: result.id || '' })
+      repairStore.setBoard({ sourceMaterialId: result.id || '', fromLocalUpload: false })
       ElMessage.success('已保存到素材库')
     }
   } catch (error) {
@@ -538,17 +541,42 @@ async function copyAll() {
   ElMessage.success('已复制全文')
 }
 
+function splitNameFunction(item) {
+  const rawName = String(item?.name || item?.component_name || '').trim()
+  const rawFn = String(item?.function || item?.function_desc || '').trim()
+  if (rawName || rawFn) {
+    return { name: rawName || String(item?.text || '未命名'), function: rawFn }
+  }
+  const text = String(item?.text || '').trim()
+  const mark = text.includes('、') ? '、' : text.includes('，') ? '，' : ''
+  if (mark) {
+    const at = text.indexOf(mark)
+    return {
+      name: text.slice(0, at).trim() || '未命名',
+      function: text.slice(at + mark.length).trim()
+    }
+  }
+  return { name: text || '未命名', function: '' }
+}
+
 function normalizeLabels(raw) {
-  return (raw || []).map((item, index) => ({
-    id: `${Date.now()}-${index}`,
-    text: String(item.text || '未命名'),
-    labelX: Number(item.labelX ?? item.lx ?? 0.1),
-    labelY: Number(item.labelY ?? item.ly ?? 0.1),
-    targetX: Number(item.targetX ?? item.tx ?? 0.3),
-    targetY: Number(item.targetY ?? item.ty ?? 0.3),
-    textColor: item.textColor || '#e53935',
-    lineColor: item.lineColor || '#e53935'
-  }))
+  return layoutLabelsNoOverlap(
+    (raw || []).map((item, index) => {
+      const parts = splitNameFunction(item)
+      return {
+        id: `${Date.now()}-${index}`,
+        text: String(item.text || parts.name || '未命名'),
+        name: parts.name,
+        function: parts.function,
+        labelX: Number(item.labelX ?? item.lx ?? 0.1),
+        labelY: Number(item.labelY ?? item.ly ?? 0.1),
+        targetX: Number(item.targetX ?? item.tx ?? 0.3),
+        targetY: Number(item.targetY ?? item.ty ?? 0.3),
+        textColor: item.textColor || '#e53935',
+        lineColor: item.lineColor || '#e53935'
+      }
+    })
+  )
 }
 
 async function openComponentMap() {
@@ -695,11 +723,32 @@ async function startAnalyze() {
 </script>
 
 <style scoped>
+.repair-workspace {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.repair-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .repair-head {
   display: flex;
   align-items: center;
   gap: 20px;
   margin-bottom: 8px;
+  flex-shrink: 0;
+  background: var(--bg);
+  z-index: 12;
 }
 
 .repair-head .page-title {
@@ -737,52 +786,62 @@ async function startAnalyze() {
   display: none;
 }
 
-.tab-panel-body,
-.map-tab-panel {
-  min-height: calc(100vh - 140px);
-}
-
-.map-tab-panel {
-  height: calc(100vh - 140px);
-}
-
-.annotate-split-page {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
-  gap: 12px;
-  height: calc(100vh - 132px);
-  min-height: 560px;
-  align-items: stretch;
-}
-
-.annotate-split-page.tab-panel-body,
-.annotate-split-page .map-tab-panel {
-  min-height: 0;
-  height: 100%;
-}
-
-.annotate-left,
-.annotate-right {
-  min-width: 0;
+.tab-scroll {
+  flex: 1;
   min-height: 0;
   overflow: auto;
 }
 
-@media (max-width: 1100px) {
-  .annotate-split-page {
-    grid-template-columns: 1fr;
-    height: auto;
-    min-height: 0;
-  }
+.analyze-page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 
-  .annotate-split-page .map-tab-panel {
-    height: min(70vh, 720px);
-    min-height: 420px;
-  }
+.analyze-head {
+  flex-shrink: 0;
+  background: var(--bg);
+  z-index: 11;
+}
 
-  .annotate-right {
-    min-height: 520px;
-  }
+.analyze-head .page-desc {
+  margin-bottom: 8px;
+}
+
+.analyze-head .toolbar {
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+
+.analyze-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-bottom: 16px;
+}
+
+.tab-panel-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.map-tab-panel {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.meter-tab-panel {
+  flex: 1;
+  min-height: 0;
 }
 
 .upload-actions {

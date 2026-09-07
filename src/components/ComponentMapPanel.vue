@@ -35,9 +35,10 @@
       <el-button size="small" type="danger" text @click="removeSelected">删除</el-button>
     </div>
 
+    <div class="map-body">
     <div class="map-stage-wrap">
     <div ref="stageRef" class="map-stage">
-      <div v-if="imageUrl" ref="frameRef" class="map-frame">
+      <div v-if="imageUrl" ref="frameRef" class="map-frame" :style="frameStyle">
         <img
           ref="imgRef"
           class="map-base"
@@ -47,31 +48,35 @@
           @load="onImageLoad"
           @error="onImageError"
         />
-        <svg class="map-svg" :viewBox="`0 0 ${box.w} ${box.h}`" preserveAspectRatio="none">
+        <svg class="map-svg" :viewBox="`0 0 ${frameW} ${frameH}`" preserveAspectRatio="none">
           <line
             v-if="dividerY != null"
             :x1="0"
-            :y1="pctY(dividerY)"
-            :x2="box.w"
-            :y2="pctY(dividerY)"
+            :y1="pctY(dividerY, true)"
+            :x2="frameW"
+            :y2="pctY(dividerY, true)"
             stroke="#e53935"
             stroke-width="2"
             stroke-dasharray="8 6"
           />
-          <g v-for="(item, index) in labels" :key="item.id">
-            <line
-              :x1="pctX(item.labelX)"
-              :y1="pctY(item.labelY)"
-              :x2="pctX(item.targetX)"
-              :y2="pctY(item.targetY)"
+          <g
+            v-for="(item, index) in labels"
+            :key="item.id"
+            class="anno-mark"
+            :class="{ 'is-flashing': flashIndex === index }"
+          >
+            <polyline
+              :points="leaderPoints(item)"
+              fill="none"
               :stroke="item.lineColor || '#e53935'"
               stroke-width="2"
+              stroke-linejoin="round"
             />
             <polygon :points="arrowHead(item)" :fill="item.lineColor || '#e53935'" />
             <circle
-              :cx="pctX(item.targetX)"
-              :cy="pctY(item.targetY)"
-              r="7"
+              :cx="pctX(item.targetX, true)"
+              :cy="pctY(item.targetY, true)"
+              r="6"
               fill="#fff"
               :stroke="item.lineColor || '#e53935'"
               stroke-width="2"
@@ -84,7 +89,7 @@
           v-for="(item, index) in labels"
           :key="`${item.id}-text`"
           class="map-label"
-          :class="{ active: selectedIndex === index }"
+          :class="{ active: selectedIndex === index, 'is-flashing': flashIndex === index }"
           :style="labelStyle(item)"
           @pointerdown.stop="startDrag(index, 'label', $event)"
         >
@@ -99,6 +104,32 @@
       <span>{{ statusText || '正在生成标注…' }}</span>
     </div>
     </div>
+    <aside class="component-table-panel" @wheel.stop>
+      <div class="component-table-head">
+        <strong>元器件列表</strong>
+        <span v-if="!generating && labels.length">共 {{ labels.length }} 个元器件</span>
+        <span v-else-if="generating">识别中…</span>
+        <span v-else>标注完成后显示</span>
+      </div>
+      <div v-if="!generating && componentRows.length" class="component-table-wrap">
+        <el-table
+          :data="componentRows"
+          height="100%"
+          size="small"
+          highlight-current-row
+          :row-class-name="tableRowClass"
+          @row-click="onTableRowClick"
+        >
+          <el-table-column type="index" label="#" width="48" />
+          <el-table-column prop="name" label="名字" min-width="88" show-overflow-tooltip />
+          <el-table-column prop="function" label="功能" min-width="120" show-overflow-tooltip />
+        </el-table>
+      </div>
+      <p v-else class="component-table-empty">
+        {{ generating ? '正在识别元器件，完成后将列出名称与功能' : '标注完成后将在此列出元器件名称与功能' }}
+      </p>
+    </aside>
+    </div>
   </section>
 </template>
 
@@ -106,6 +137,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
+import { pushOutsidePhoto } from '@/services/annotationLayout'
 
 const props = defineProps({
   imageUrl: { type: String, default: '' },
@@ -123,6 +155,8 @@ const frameRef = ref(null)
 const imgRef = ref(null)
 const displaySrc = ref('')
 const selectedIndex = ref(-1)
+const flashIndex = ref(-1)
+let flashTimer = 0
 let objectUrl = ''
 
 function revokeObjectUrl() {
@@ -174,6 +208,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   revokeObjectUrl()
+  window.clearTimeout(flashTimer)
 })
 const box = reactive({ w: 1, h: 1 })
 const drag = reactive({
@@ -186,6 +221,41 @@ const selected = computed(() =>
   selectedIndex.value >= 0 ? props.labels[selectedIndex.value] : null
 )
 
+function calcFramePad(imgW, imgH, labels) {
+  const w = Math.max(1, imgW)
+  const h = Math.max(1, imgH)
+  let left = w * 0.16
+  let right = w * 0.16
+  let top = h * 0.1
+  let bottom = h * 0.1
+  for (const item of labels || []) {
+    const n = Math.max(1, String(item.text || '').length)
+    const hw = Math.min(0.24, Math.max(0.03, n * 0.0075)) * w
+    const hh = 0.02 * h
+    const lx = Number(item.labelX) || 0
+    const ly = Number(item.labelY) || 0
+    left = Math.max(left, hw - lx * w + 12)
+    right = Math.max(right, lx * w + hw - w + 12)
+    top = Math.max(top, hh - ly * h + 12)
+    bottom = Math.max(bottom, ly * h + hh - h + 12)
+  }
+  return {
+    left: Math.ceil(Math.max(64, left)),
+    right: Math.ceil(Math.max(64, right)),
+    top: Math.ceil(Math.max(40, top)),
+    bottom: Math.ceil(Math.max(40, bottom))
+  }
+}
+
+const framePad = computed(() => calcFramePad(box.w, box.h, props.labels))
+
+const frameStyle = computed(() => ({
+  padding: `${framePad.value.top}px ${framePad.value.right}px ${framePad.value.bottom}px ${framePad.value.left}px`
+}))
+
+const frameW = computed(() => box.w + framePad.value.left + framePad.value.right)
+const frameH = computed(() => box.h + framePad.value.top + framePad.value.bottom)
+
 watch(
   selected,
   (item) => {
@@ -194,16 +264,79 @@ watch(
   { deep: true }
 )
 
+watch(
+  () => props.labels.length,
+  () => {
+    syncBox()
+  }
+)
+
+function splitLabel(item) {
+  const rawName = String(item?.name || item?.component_name || '').trim()
+  const rawFn = String(item?.function || item?.function_desc || '').trim()
+  if (rawName || rawFn) {
+    return { name: rawName || String(item?.text || '未命名'), function: rawFn }
+  }
+  const text = String(item?.text || '').trim()
+  const mark = text.includes('、') ? '、' : text.includes('，') ? '，' : ''
+  if (mark) {
+    const at = text.indexOf(mark)
+    return {
+      name: text.slice(0, at).trim() || '未命名',
+      function: text.slice(at + mark.length).trim()
+    }
+  }
+  return { name: text || '未命名', function: '' }
+}
+
+const componentRows = computed(() =>
+  (props.labels || []).map((item, index) => {
+    const parts = splitLabel(item)
+    return {
+      index,
+      id: item.id,
+      name: parts.name,
+      function: parts.function || '—'
+    }
+  })
+)
+
+function tableRowClass({ rowIndex }) {
+  return rowIndex === selectedIndex.value ? 'is-active-row' : ''
+}
+
+function onTableRowClick(row) {
+  selectedIndex.value = row.index
+  startFlash(row.index)
+}
+
+function startFlash(index) {
+  window.clearTimeout(flashTimer)
+  flashIndex.value = -1
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      flashIndex.value = index
+    })
+  })
+  flashTimer = window.setTimeout(() => {
+    if (flashIndex.value === index) flashIndex.value = -1
+  }, 1100)
+}
+
 function clamp(n) {
   return Math.min(1, Math.max(0, n))
 }
 
-function pctX(v) {
-  return clamp(Number(v) || 0) * box.w
+function pctX(v, asTarget = false) {
+  const n = Number(v) || 0
+  const x = asTarget ? clamp(n) : n
+  return framePad.value.left + x * box.w
 }
 
-function pctY(v) {
-  return clamp(Number(v) || 0) * box.h
+function pctY(v, asTarget = false) {
+  const n = Number(v) || 0
+  const y = asTarget ? clamp(n) : n
+  return framePad.value.top + y * box.h
 }
 
 function onImageLoad() {
@@ -220,33 +353,83 @@ function onImageError() {
 
 function syncBox() {
   const img = imgRef.value
+  const stage = stageRef.value
   if (!img) return
-  if (img.clientWidth < 8 && img.naturalWidth > 8) {
-    const stageW = stageRef.value?.clientWidth || 900
-    const stageH = Math.min(window.innerHeight * 0.68, 680)
-    const scale = Math.min(stageW / img.naturalWidth, stageH / img.naturalHeight, 1)
-    img.style.width = `${Math.max(8, Math.round(img.naturalWidth * scale))}px`
-    img.style.height = `${Math.max(8, Math.round(img.naturalHeight * scale))}px`
+  const nw = img.naturalWidth || 0
+  const nh = img.naturalHeight || 0
+  if (nw < 8 || nh < 8) {
+    box.w = img.clientWidth || 1
+    box.h = img.clientHeight || 1
+    return
   }
-  box.w = img.clientWidth || img.naturalWidth || 1
-  box.h = img.clientHeight || img.naturalHeight || 1
+  const sw = Math.max(80, (stage?.clientWidth || 900) - 8)
+  const sh = Math.max(80, (stage?.clientHeight || 480) - 8)
+  let scale = Math.min(sw / nw, sh / nh, 1)
+  for (let i = 0; i < 4; i += 1) {
+    const w = nw * scale
+    const h = nh * scale
+    const pad = calcFramePad(w, h, props.labels)
+    const fit = Math.min(sw / (w + pad.left + pad.right), sh / (h + pad.top + pad.bottom), 1)
+    scale *= fit
+    if (fit > 0.997) break
+  }
+  const nextW = Math.max(8, Math.round(nw * scale))
+  const nextH = Math.max(8, Math.round(nh * scale))
+  const wCss = `${nextW}px`
+  const hCss = `${nextH}px`
+  if (img.style.width !== wCss || img.style.height !== hCss) {
+    img.style.maxWidth = 'none'
+    img.style.maxHeight = 'none'
+    img.style.width = wCss
+    img.style.height = hCss
+  }
+  box.w = nextW
+  box.h = nextH
 }
 
 function labelStyle(item) {
   return {
-    left: `${clamp(item.labelX) * 100}%`,
-    top: `${clamp(item.labelY) * 100}%`,
+    left: `${pctX(item.labelX)}px`,
+    top: `${pctY(item.labelY)}px`,
     color: item.textColor || '#e53935'
   }
 }
 
-function arrowHead(item) {
+function inferSide(item) {
+  if (item.side) return item.side
+  const tx = clamp(item.targetX)
+  const ty = clamp(item.targetY)
+  const lx = Number(item.labelX) || 0
+  const ly = Number(item.labelY) || 0
+  const dx = Math.abs(lx - tx)
+  const dy = Math.abs(ly - ty)
+  if (dx >= dy) return lx < tx ? 'left' : 'right'
+  return ly < ty ? 'top' : 'bottom'
+}
+
+function elbowOf(item) {
+  const side = inferSide(item)
+  if (side === 'left' || side === 'right') {
+    return { x: pctX(item.labelX), y: pctY(item.targetY, true) }
+  }
+  return { x: pctX(item.targetX, true), y: pctY(item.labelY) }
+}
+
+function leaderPoints(item) {
   const x1 = pctX(item.labelX)
   const y1 = pctY(item.labelY)
-  const x2 = pctX(item.targetX)
-  const y2 = pctY(item.targetY)
-  const angle = Math.atan2(y2 - y1, x2 - x1)
-  const len = 12
+  const mid = elbowOf(item)
+  const x2 = pctX(item.targetX, true)
+  const y2 = pctY(item.targetY, true)
+  return `${x1},${y1} ${mid.x},${mid.y} ${x2},${y2}`
+}
+
+function arrowHead(item) {
+  const mid = elbowOf(item)
+  const x2 = pctX(item.targetX, true)
+  const y2 = pctY(item.targetY, true)
+  const angle = Math.atan2(y2 - mid.y, x2 - mid.x)
+  const len = 11
   const a1 = angle + Math.PI * 0.82
   const a2 = angle - Math.PI * 0.82
   const p1 = `${x2},${y2}`
@@ -275,12 +458,16 @@ function onStageDown() {
 }
 
 function onMove(event) {
-  if (!drag.active || !imgRef.value) return
-  const rect = imgRef.value.getBoundingClientRect()
-  const x = clamp((event.clientX - rect.left) / rect.width)
-  const y = clamp((event.clientY - rect.top) / rect.height)
-  if (drag.mode === 'label') patchLabel(drag.index, { labelX: x, labelY: y })
-  else patchLabel(drag.index, { targetX: x, targetY: y })
+  if (!drag.active || !imgRef.value || !frameRef.value) return
+  const frame = frameRef.value.getBoundingClientRect()
+  const pad = framePad.value
+  const x = (event.clientX - frame.left - pad.left) / Math.max(1, box.w)
+  const y = (event.clientY - frame.top - pad.top) / Math.max(1, box.h)
+  if (drag.mode === 'label') {
+    const item = props.labels[drag.index]
+    const next = pushOutsidePhoto({ ...item, labelX: x, labelY: y, side: item.side })
+    patchLabel(drag.index, { labelX: next.labelX, labelY: next.labelY, side: next.side })
+  } else patchLabel(drag.index, { targetX: clamp(x), targetY: clamp(y) })
 }
 
 function stopDrag() {
@@ -293,8 +480,10 @@ function addLabel() {
   const item = {
     id: `${Date.now()}`,
     text: '新标注',
-    labelX: 0.12,
-    labelY: 0.12,
+    name: '新标注',
+    function: '',
+    labelX: -0.08,
+    labelY: 0.2,
     targetX: 0.35,
     targetY: 0.28,
     textColor: '#e53935',
@@ -341,35 +530,58 @@ function drawArrow(ctx, x1, y1, x2, y2, color) {
 async function downloadPng() {
   if (!props.imageUrl) return
   const img = await loadImage(props.imageUrl)
+  const nw = img.naturalWidth
+  const nh = img.naturalHeight
+  let pl = nw * 0.16
+  let pr = nw * 0.16
+  let pt = nh * 0.1
+  let pb = nh * 0.1
+  props.labels.forEach((item) => {
+    const n = Math.max(1, String(item.text || '').length)
+    const hw = Math.min(0.24, Math.max(0.03, n * 0.0075)) * nw
+    const hh = 0.02 * nh
+    const lx = Number(item.labelX) || 0
+    const ly = Number(item.labelY) || 0
+    pl = Math.max(pl, hw - lx * nw + 16)
+    pr = Math.max(pr, lx * nw + hw - nw + 16)
+    pt = Math.max(pt, hh - ly * nh + 16)
+    pb = Math.max(pb, ly * nh + hh - nh + 16)
+  })
+  pl = Math.ceil(Math.max(80, pl))
+  pr = Math.ceil(Math.max(80, pr))
+  pt = Math.ceil(Math.max(48, pt))
+  pb = Math.ceil(Math.max(48, pb))
   const canvas = document.createElement('canvas')
-  canvas.width = img.naturalWidth
-  canvas.height = img.naturalHeight
+  canvas.width = nw + pl + pr
+  canvas.height = nh + pt + pb
   const ctx = canvas.getContext('2d')
-  ctx.drawImage(img, 0, 0)
+  ctx.fillStyle = '#f4f6fa'
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  ctx.drawImage(img, pl, pt)
   if (props.dividerY != null) {
     ctx.setLineDash([12, 8])
     ctx.strokeStyle = '#e53935'
-    ctx.lineWidth = Math.max(2, canvas.width / 400)
-    const y = clamp(props.dividerY) * canvas.height
+    ctx.lineWidth = Math.max(2, nw / 400)
+    const y = pt + clamp(props.dividerY) * nh
     ctx.beginPath()
     ctx.moveTo(0, y)
     ctx.lineTo(canvas.width, y)
     ctx.stroke()
     ctx.setLineDash([])
   }
-  const fontSize = Math.max(16, Math.round(canvas.width / 42))
+  const fontSize = Math.max(16, Math.round(nw / 42))
   ctx.font = `bold ${fontSize}px Microsoft YaHei, sans-serif`
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   if (props.title) {
     ctx.fillStyle = '#e53935'
-    ctx.fillText(props.title, canvas.width / 2, fontSize * 1.2)
+    ctx.fillText(props.title, canvas.width / 2, pt * 0.45)
   }
   props.labels.forEach((item) => {
-    const lx = clamp(item.labelX) * canvas.width
-    const ly = clamp(item.labelY) * canvas.height
-    const tx = clamp(item.targetX) * canvas.width
-    const ty = clamp(item.targetY) * canvas.height
+    const lx = pl + Number(item.labelX) * nw
+    const ly = pt + Number(item.labelY) * nh
+    const tx = pl + clamp(item.targetX) * nw
+    const ty = pt + clamp(item.targetY) * nh
     drawArrow(ctx, lx, ly, tx, ty, item.lineColor || '#e53935')
     ctx.fillStyle = item.textColor || '#e53935'
     ctx.fillText(item.text || '', lx, ly)
@@ -398,6 +610,19 @@ defineExpose({ syncBox })
   flex-wrap: wrap;
 }
 
+.page-desc {
+  flex-shrink: 0;
+}
+
+.map-body {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  gap: 12px;
+  overflow: hidden;
+}
+
 .regen-btn.is-disabled,
 .regen-btn:disabled {
   color: var(--muted) !important;
@@ -407,10 +632,72 @@ defineExpose({ syncBox })
 .map-stage-wrap {
   position: relative;
   flex: 1;
-  min-height: 420px;
+  min-height: 0;
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+
+.component-table-panel {
+  flex: 0 0 360px;
+  width: 360px;
+  min-width: 300px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #10182a;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.component-table-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px 8px;
+  color: var(--text);
+}
+
+.component-table-head span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.component-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 8px 10px;
+}
+
+.component-table-empty {
+  margin: 0;
+  padding: 16px 14px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.component-table-panel :deep(.el-table) {
+  --el-table-bg-color: #10182a;
+  --el-table-tr-bg-color: #10182a;
+  --el-table-header-bg-color: #162238;
+  --el-table-text-color: var(--text);
+  --el-table-header-text-color: var(--muted);
+  --el-table-border-color: var(--line);
+  --el-table-row-hover-bg-color: #1c2a44;
+  background: #10182a;
+}
+
+.component-table-panel :deep(.el-table__body-wrapper) {
+  overflow-y: auto !important;
+}
+
+.component-table-panel :deep(.is-active-row > td.el-table__cell) {
+  background: rgba(62, 224, 197, 0.12) !important;
 }
 
 .edit-bar {
@@ -437,10 +724,11 @@ defineExpose({ syncBox })
   background: #0c1220;
   border: 1px solid var(--line);
   border-radius: 12px;
-  overflow: auto;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 6px;
 }
 
 .map-loading {
@@ -469,17 +757,16 @@ defineExpose({ syncBox })
 .map-frame {
   position: relative;
   display: inline-block;
-  max-width: 100%;
   line-height: 0;
-  background: transparent;
+  background: #f4f6fa;
+  border-radius: 8px;
+  flex-shrink: 0;
 }
 
 .map-base {
   display: block;
   width: auto;
   height: auto;
-  max-width: 100%;
-  max-height: min(68vh, 720px);
   object-fit: contain;
   vertical-align: top;
   user-select: none;
@@ -498,6 +785,30 @@ defineExpose({ syncBox })
 
 .handle {
   cursor: move;
+}
+
+.anno-mark.is-flashing {
+  animation: annotate-flash 0.36s ease-in-out 3;
+}
+
+.anno-mark.is-flashing circle {
+  filter: drop-shadow(0 0 7px currentColor);
+}
+
+.map-label.is-flashing {
+  animation: annotate-flash 0.36s ease-in-out 3;
+  outline: 2px solid currentColor;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+@keyframes annotate-flash {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.12;
+  }
 }
 
 .map-label {

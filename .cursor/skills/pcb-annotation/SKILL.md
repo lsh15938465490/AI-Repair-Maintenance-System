@@ -9,9 +9,12 @@ description: >-
 
 # 电路板元件标注质检
 
+生成后端优先使用 `pcb_annotate/`（YOLOv11 定位、VLM 命名、OpenCV 只叠加箭头文字）。全图 VLM 路径仅作回退。
+
 运行时提示词：
 
-- 首次标注 `src/skills/pcb-annotation.md`
+- VLM 元件识别系统提示词 `src/skills/pcb-vlm-component.md`（每次把标注图片发给模型时作为 system）
+- 首次全图标注 `src/skills/pcb-annotation.md`
 - 复查 `src/skills/pcb-annotation-review.md`
 - 文字避让由 `src/services/annotationLayout.js` 在每一轮之后执行
 

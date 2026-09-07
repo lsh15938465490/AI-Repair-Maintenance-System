@@ -126,6 +126,108 @@ export async function testConnection({ providerId, apiKey }) {
   return typeof content === 'string' ? content : JSON.stringify(content || data)
 }
 
+function extractDelta(json) {
+  const delta = json?.choices?.[0]?.delta?.content ?? json?.choices?.[0]?.message?.content ?? ''
+  if (typeof delta === 'string') return delta
+  if (Array.isArray(delta)) {
+    return delta.map((part) => (typeof part === 'string' ? part : part?.text || '')).join('')
+  }
+  if (delta && typeof delta === 'object') return String(delta.text || delta.content || '')
+  return ''
+}
+
+async function consumeSseStream(res, onDelta) {
+  if (!res.body || !res.body.getReader) {
+    const text = await res.text()
+    const data = JSON.parse(text)
+    const content = data?.choices?.[0]?.message?.content
+    if (typeof content === 'string' && content) onDelta(content)
+    return
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    const lines = buf.split(/\r?\n/)
+    buf = lines.pop() || ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data:')) continue
+      const payload = trimmed.slice(5).trim()
+      if (!payload || payload === '[DONE]') continue
+      try {
+        const piece = extractDelta(JSON.parse(payload))
+        if (piece) onDelta(piece)
+      } catch {
+        // skip malformed chunk
+      }
+    }
+  }
+}
+
+export async function typeText(text, onDelta, ms = 16) {
+  const source = String(text || '')
+  for (const ch of source) {
+    onDelta(ch)
+    await new Promise((resolve) => setTimeout(resolve, ms))
+  }
+}
+
+export async function streamKnowledgeAssistant({ providerId, apiKey, question, hits, onDelta }) {
+  const provider = getProvider(providerId)
+  const body = hits
+    .map((item, i) => `【资料${i + 1}｜${item.name}】\n${item.text}`)
+    .join('\n\n')
+  const payload = {
+    model: provider.model,
+    temperature: 0.2,
+    max_tokens: 2048,
+    stream: true,
+    messages: [
+      {
+        role: 'system',
+        content:
+          '你是电路板维修知识库助手。只根据用户提供的本地资料片段回答问题，不要编造资料中没有的内容。若资料不足，明确说明知识库未覆盖该问题，并列出已找到的相关条目。回答使用简体中文，条理清晰，必要时引用资料名称。'
+      },
+      {
+        role: 'user',
+        content: `问题：${question}\n\n本地知识库检索结果：\n${body || '（无匹配片段）'}`
+      }
+    ]
+  }
+  const url = `${provider.baseUrl}${provider.chatPath}`
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${apiKey}`
+  }
+
+  if (window.electronAPI?.aiStream) {
+    const result = await window.electronAPI.aiStream({ url, headers, body: payload }, onDelta)
+    if (result && result.ok === false) throw new Error(result.error || '流式请求失败')
+    return
+  }
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload)
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    let data = null
+    try {
+      data = text ? JSON.parse(text) : null
+    } catch {
+      data = { raw: text }
+    }
+    throw new Error(data?.error?.message || data?.message || text || `请求失败(${res.status})`)
+  }
+  await consumeSseStream(res, onDelta)
+}
+
 const ANNOTATE_PROMPT = PCB_ANNOTATION_SKILL
 const REVIEW_PROMPT = PCB_ANNOTATION_REVIEW_SKILL
 
@@ -165,13 +267,35 @@ function near(a, b, dist = 0.035) {
   return Math.hypot(pa.targetX - pb.targetX, pa.targetY - pb.targetY) < dist
 }
 
+function nearestLabel(labels, x, y) {
+  let best = null
+  let bestDist = Infinity
+  labels.forEach((item) => {
+    const d = Math.hypot((Number(item.targetX) || 0) - x, (Number(item.targetY) || 0) - y)
+    if (d < bestDist) {
+      bestDist = d
+      best = item
+    }
+  })
+  return bestDist <= 0.12 ? best : null
+}
+
 export function applyLabelCorrections(labels, corrections) {
   const next = (labels || []).map((item) => ({ ...item }))
   ;(corrections || []).forEach((fix) => {
     if (!fix) return
-    const hit = next.find(
-      (item) => item.text === fix.fromText || item.text === fix.text
-    )
+    let hit = null
+    const idx = Number(fix.fromIndex)
+    if (Number.isInteger(idx) && next[idx]) hit = next[idx]
+    if (!hit && (fix.fromText || fix.text)) {
+      hit = next.find((item) => item.text === fix.fromText || item.text === fix.text)
+    }
+    if (!hit && fix.fromTargetX != null && fix.fromTargetY != null) {
+      hit = nearestLabel(next, Number(fix.fromTargetX), Number(fix.fromTargetY))
+    }
+    if (!hit && fix.targetX != null && fix.targetY != null) {
+      hit = nearestLabel(next, Number(fix.targetX), Number(fix.targetY))
+    }
     if (!hit) return
     if (fix.text) hit.text = fix.text
     if (fix.targetX != null) hit.targetX = Number(fix.targetX)
@@ -212,9 +336,12 @@ export async function annotateComponents({ providerId, apiKey, images, knowledge
 export async function reviewComponentLabels({ providerId, apiKey, images, existingLabels }) {
   const provider = getProvider(providerId)
   const brief = (existingLabels || [])
-    .map((item, i) => `${i + 1}.${item.text}@(${Number(item.targetX).toFixed(2)},${Number(item.targetY).toFixed(2)})`)
-    .join('；')
-  const userText = `请复查：是否标注完成、文字是否准确、箭头是否指在对应元件中心。当前 ${existingLabels?.length || 0} 条：${brief || '无'}。`
+    .map(
+      (item, i) =>
+        `${i}.${item.text}|target=${Number(item.targetX).toFixed(3)},${Number(item.targetY).toFixed(3)}`
+    )
+    .join('\n')
+  const userText = `请对照第一张正面实拍图，逐条检查名称是否与所指元件一致，以及箭头终点是否在该元件中心。坐标相对整张图片。当前 ${existingLabels?.length || 0} 条：\n${brief || '无'}`
   const parsed = await chatJson({
     provider,
     apiKey,
@@ -236,7 +363,7 @@ export async function annotateComponentsUntilComplete({
   apiKey,
   images,
   knowledgeContext = '',
-  maxRounds = 4,
+  maxRounds = 5,
   onProgress
 } = {}) {
   onProgress?.('正在识别并标注全部元器件…')
@@ -246,10 +373,11 @@ export async function annotateComponentsUntilComplete({
   let dividerY = typeof first.dividerY === 'number' ? first.dividerY : null
   let complete = false
   let rounds = 0
+  const minRounds = 2
 
   for (let round = 1; round <= maxRounds; round += 1) {
     rounds = round
-    onProgress?.(`第 ${round} 次复查：完成度、文字与位置（当前 ${labels.length} 项）…`)
+    onProgress?.(`第 ${round} 次复查：核对名称是否指对元件、箭头是否在元件中心（当前 ${labels.length} 项）…`)
     const review = await reviewComponentLabels({
       providerId,
       apiKey,
@@ -261,17 +389,22 @@ export async function annotateComponentsUntilComplete({
       mergeAnnotationLabels(applyLabelCorrections(labels, review.corrections), review.missing)
     )
     const unchanged = snapshot === JSON.stringify(labels.map((item) => [item.text, item.targetX, item.targetY]))
-    if (review.complete && review.accurate) {
+    const passed = review.complete && review.accurate
+    if (passed && round >= minRounds) {
       complete = true
-      onProgress?.(`复查通过：已完成且位置已校正，共 ${labels.length} 项`)
+      onProgress?.(`复查通过：名称与箭头位置已核对，共 ${labels.length} 项`)
       break
     }
-    if (unchanged) {
-      complete = review.complete && review.accurate
-      onProgress?.(`复查结束，共 ${labels.length} 项${complete ? '' : '，请再人工核对箭头位置'}`)
+    if (unchanged && round >= minRounds) {
+      complete = passed
+      onProgress?.(
+        complete
+          ? `复查通过：名称与箭头位置已核对，共 ${labels.length} 项`
+          : `已完成 ${round} 轮名称与箭头复查，共 ${labels.length} 项，仍请再人工核对`
+      )
       break
     }
-    onProgress?.(`已根据复查补标/纠偏，继续下一轮…`)
+    onProgress?.(`已根据复查纠正名称/箭头，继续下一轮…`)
   }
 
   labels = layoutLabelsNoOverlap(labels)

@@ -1,8 +1,8 @@
 <template>
   <div>
-    <h2 class="page-title">素材</h2>
+    <h2 class="page-title">素材库</h2>
     <p class="page-desc">
-      保存查找结果中的电路板图片，可按与查找模块相同的品类、产品、品牌筛选和改分类。图片会写入本机「素材」文件夹。
+      保存查找结果中的电路板图片，可按与查找模块相同的品类、产品、品牌筛选和改分类。图片会写入本机 materials 文件夹。
     </p>
     <p v-if="materials.folderPath" class="page-desc" style="margin-top: -8px">
       保存位置：{{ materials.folderPath }}
@@ -37,7 +37,7 @@
 
     <section class="panel" style="margin-top: 16px">
       <div class="toolbar" style="margin-top: 0">
-        <h3 style="margin: 0">素材列表</h3>
+        <h3 style="margin: 0">素材库</h3>
         <span class="page-desc" style="margin: 0">共 {{ filtered.length }} / {{ materials.items.length }} 条</span>
       </div>
       <div v-if="filtered.length" class="result-cards">
@@ -72,11 +72,12 @@
           </p>
           <div class="card-actions">
             <el-button size="small" @click="openEdit(item)">编辑分类</el-button>
+            <el-button size="small" type="primary" @click="goToRepair(item)">维修识别</el-button>
             <el-button size="small" type="danger" text @click="removeItem(item)">删除</el-button>
           </div>
         </article>
       </div>
-      <p v-else class="page-desc">暂无匹配素材。请先在「查找」结果中点击「保存到素材」。</p>
+      <p v-else class="page-desc">暂无匹配项。请先在「查找」结果中点击「保存到素材库」。</p>
     </section>
 
     <el-dialog
@@ -88,7 +89,7 @@
     >
       <p class="page-desc">点击图片可放大预览。选择正面 / 反面 / 原理图后保存。</p>
       <div v-if="slotSrc" class="slot-dialog-stage" title="点击预览大图" @click="lightboxOpen = true">
-        <img :src="slotSrc" alt="素材图片" />
+        <img :src="slotSrc" alt="素材库图片" />
       </div>
       <el-radio-group v-model="slotKind" class="slot-kind-group">
         <el-radio-button v-for="slot in previewSlots" :key="slot.key" :value="slot.key" :label="slot.key">
@@ -105,7 +106,7 @@
       <img v-if="slotSrc" class="lightbox-img" :src="slotSrc" alt="预览" />
     </el-dialog>
 
-    <el-dialog v-model="editOpen" title="编辑素材分类" width="520px" append-to-body>
+    <el-dialog v-model="editOpen" title="编辑分类" width="520px" append-to-body>
       <el-form v-if="draft" label-width="100px">
         <el-form-item label="标题">
           <el-input v-model="draft.title" />
@@ -140,6 +141,7 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useMaterialsStore } from '@/stores/materials'
 import { openMaterialsFolder } from '@/utils/materialFolder'
@@ -151,6 +153,7 @@ import {
 } from '@/data/pcbIconCatalog'
 
 const materials = useMaterialsStore()
+const router = useRouter()
 const categoryId = ref('')
 const productId = ref('')
 const brand = ref('')
@@ -197,7 +200,7 @@ const filtered = computed(() => {
 })
 
 onMounted(() => {
-  materials.load().catch(() => ElMessage.error('本地素材读取失败'))
+  materials.load().catch(() => ElMessage.error('本地素材库读取失败'))
 })
 
 async function openFolder() {
@@ -205,7 +208,7 @@ async function openFolder() {
     const result = await openMaterialsFolder()
     if (result?.error) ElMessage.warning(result.error)
   } catch (error) {
-    ElMessage.info(error.message || '请在资源管理器中打开项目下的「素材」文件夹')
+    ElMessage.info(error.message || '请在资源管理器中打开项目下的 materials 文件夹')
   }
 }
 
@@ -264,6 +267,14 @@ async function saveSlotKind() {
   }
 }
 
+function goToRepair(item) {
+  if (!item?.front && !item?.back && !item?.schematic) {
+    ElMessage.warning('该条目没有可识别的图片')
+    return
+  }
+  router.push({ name: 'repair', query: { material: item.id } })
+}
+
 function openEdit(item) {
   draft.value = { ...item }
   editOpen.value = true
@@ -276,7 +287,7 @@ async function saveEdit() {
 }
 
 async function removeItem(item) {
-  await ElMessageBox.confirm(`删除素材「${item.title}」？`, '删除确认', {
+  await ElMessageBox.confirm(`删除「${item.title}」？`, '删除确认', {
     confirmButtonText: '删除',
     cancelButtonText: '取消',
     type: 'warning'

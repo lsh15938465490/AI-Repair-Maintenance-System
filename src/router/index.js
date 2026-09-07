@@ -15,6 +15,11 @@ const router = createRouter({
           component: () => import('@/views/RepairView.vue')
         },
         {
+          path: 'assistant',
+          name: 'assistant',
+          component: () => import('@/views/AssistantView.vue')
+        },
+        {
           path: 'knowledge',
           name: 'knowledge',
           component: () => import('@/views/KnowledgeView.vue')

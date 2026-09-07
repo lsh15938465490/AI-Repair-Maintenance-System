@@ -97,6 +97,17 @@ a {
   overflow: auto;
 }
 
+.content-lock {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.content-lock > * {
+  flex: 1;
+  min-height: 0;
+}
+
 .page-title {
   margin: 0 0 6px;
   font-size: 22px;

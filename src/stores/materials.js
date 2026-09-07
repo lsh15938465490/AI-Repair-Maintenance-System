@@ -90,7 +90,7 @@ function baseRow(meta, extra = {}) {
     extra: meta.extra || '',
     note: extra.note || '',
     createdAt,
-    folder: '素材'
+    folder: 'materials'
   }
 }
 
@@ -180,7 +180,22 @@ export const useMaterialsStore = defineStore('materials', {
       await saveMaterialToFolder(folderPayload(row))
       await saveMaterial(row)
       await this.load()
-      return { duplicated: false }
+      return { duplicated: false, id: row.id }
+    },
+    async updateBoardSet(id, { front, back, schematic }) {
+      const row = this.items.find((item) => item.id === id)
+      if (!row) return { missing: true }
+      const next = {
+        ...row,
+        front: (await persistSrc(front)) || '',
+        back: (await persistSrc(back)) || '',
+        schematic: (await persistSrc(schematic)) || ''
+      }
+      next.thumb = next.front || next.back || next.schematic || next.thumb
+      await saveMaterialToFolder(folderPayload(next))
+      await saveMaterial(next)
+      await this.load()
+      return { duplicated: false, id }
     },
     async update(row) {
       const next = normalizeMaterial(row)

@@ -60,23 +60,15 @@ export async function pdfToImageDataUrl(file) {
   return canvas.toDataURL('image/jpeg', 0.82)
 }
 
-export function isKnowledgeFile(file) {
+export function isKnowledgeFile() {
+  return true
+}
+
+function isTextLikeFile(file) {
   const name = (file?.name || '').toLowerCase()
   const type = (file?.type || '').toLowerCase()
-  return (
-    name.endsWith('.txt') ||
-    name.endsWith('.md') ||
-    name.endsWith('.csv') ||
-    name.endsWith('.json') ||
-    name.endsWith('.pdf') ||
-    name.endsWith('.docx') ||
-    type === 'text/plain' ||
-    type === 'text/markdown' ||
-    type === 'text/csv' ||
-    type === 'application/json' ||
-    type === 'application/pdf' ||
-    type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-  )
+  if (type.startsWith('text/') || type === 'application/json' || type === 'application/xml') return true
+  return /\.(txt|md|csv|json|xml|html|htm|log|yml|yaml|ini|cfg|js|ts|css|svg)$/i.test(name)
 }
 
 export async function pdfToText(file, maxPages = 40) {
@@ -111,17 +103,60 @@ export async function docxToText(file) {
   return String(result.value || '').trim()
 }
 
+export async function docBinaryToText(file) {
+  const buffer = await file.arrayBuffer()
+  const bytes = new Uint8Array(buffer)
+  const parts = []
+  let run = ''
+  const flush = () => {
+    if (run.trim().length >= 6) parts.push(run.trim())
+    run = ''
+  }
+  const view = new DataView(buffer)
+  const even = bytes.byteLength - (bytes.byteLength % 2)
+  for (let i = 0; i < even; i += 2) {
+    const c = view.getUint16(i, true)
+    if (c >= 0x20 && c < 0xfffe && c !== 0xfeff) run += String.fromCharCode(c)
+    else flush()
+  }
+  flush()
+  const unicode = parts.join('\n')
+  if (unicode.replace(/\s/g, '').length > 40) return unicode
+  parts.length = 0
+  run = ''
+  for (const b of bytes) {
+    if (b >= 0x20 && b < 0x7f) run += String.fromCharCode(b)
+    else flush()
+  }
+  flush()
+  return parts.join('\n')
+}
+
 export async function extractKnowledgeText(file) {
   const name = (file?.name || '').toLowerCase()
   const type = (file?.type || '').toLowerCase()
-  if (name.endsWith('.pdf') || type === 'application/pdf') {
-    return pdfToText(file)
+  try {
+    if (name.endsWith('.pdf') || type === 'application/pdf') {
+      return await pdfToText(file)
+    }
+    if (
+      name.endsWith('.docx') ||
+      type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    ) {
+      return await docxToText(file)
+    }
+    if (name.endsWith('.doc') || type === 'application/msword') {
+      try {
+        return await docxToText(file)
+      } catch {
+        return await docBinaryToText(file)
+      }
+    }
+    if (isTextLikeFile(file)) {
+      return await readTextFile(file)
+    }
+    return ''
+  } catch {
+    return ''
   }
-  if (
-    name.endsWith('.docx') ||
-    type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-  ) {
-    return docxToText(file)
-  }
-  return readTextFile(file)
 }

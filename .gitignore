@@ -15,5 +15,16 @@ tmp-test
 repair-home.png
 repair-with-images.png
 素材/**
-!素材/.gitkeep
+素材库/**
+materials/**
+!materials/.gitkeep
+search/**
+!search/.gitkeep
+pcb_annotate/output/**
+!pcb_annotate/output/.gitkeep
+pcb_annotate/weights/*.pt
+pcb_annotate/__pycache__/
+pcb_annotate/**/__pycache__/
+.venv
+venv
 
