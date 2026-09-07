@@ -3,12 +3,14 @@ import vue from '@vitejs/plugin-vue'
 import { VitePWA } from 'vite-plugin-pwa'
 import { fileURLToPath, URL } from 'node:url'
 import { materialsFolderPlugin } from './vite-plugin-materials-folder.js'
+import { meterMockPlugin } from './vite-plugin-meter-mock.js'
 
 export default defineConfig({
   base: './',
   plugins: [
     vue(),
     materialsFolderPlugin(),
+    meterMockPlugin(),
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg'],

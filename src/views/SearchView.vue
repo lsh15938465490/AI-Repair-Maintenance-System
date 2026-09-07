@@ -2,7 +2,7 @@
   <div>
     <h2 class="page-title">查找</h2>
     <p class="page-desc">
-      按品类、产品和品牌检索公开网页中的电路板图片，或由当前模型优化关键词后检索、生成原创教学示意图。不收集破解、盗版与违禁内容，结果请自行确认版权与用途。
+      按品类、产品和品牌检索公开网页中的电路板图片，或由当前模型优化关键词后检索、生成原创教学示意图。查找结果会临时写入本机 search 文件夹，超过 30 分钟自动删除。
     </p>
 
     <section class="panel">
@@ -76,7 +76,7 @@
               :loading="savingKey === itemKey(item)"
               @click="saveToMaterials(item)"
             >
-              {{ materials.isSaved(item) ? '已保存' : '保存到素材' }}
+              {{ materials.isSaved(item) ? '已保存' : '保存到素材库' }}
             </el-button>
           </div>
         </article>
@@ -106,7 +106,7 @@
           :loading="previewItem && savingKey === itemKey(previewItem)"
           @click="saveToMaterials(previewItem)"
         >
-          {{ previewItem && materials.isSaved(previewItem) ? '已保存' : '保存到素材' }}
+          {{ previewItem && materials.isSaved(previewItem) ? '已保存' : '保存到素材库' }}
         </el-button>
       </template>
     </el-dialog>
@@ -132,6 +132,7 @@ import {
   searchLegalBoardImages,
   svgToDataUrl
 } from '@/services/iconSearch'
+import { cacheSearchResults, purgeSearchCache } from '@/utils/searchFolder'
 
 const router = useRouter()
 const settings = useSettingsStore()
@@ -174,7 +175,12 @@ function onProductChange() {
 
 onMounted(() => {
   materials.load().catch(() => {})
+  purgeSearchCache().catch(() => {})
 })
+
+function cacheHits(list) {
+  cacheSearchResults(list).catch(() => {})
+}
 
 function itemKey(item) {
   return item?.pageUrl || item?.url || item?.thumb || item?.title || ''
@@ -190,8 +196,8 @@ async function saveToMaterials(item) {
       brand: brand.value,
       extra: extra.value
     })
-    if (result.duplicated) ElMessage.info('该图片已在素材中')
-    else ElMessage.success('已保存到素材文件夹')
+    if (result.duplicated) ElMessage.info('该图片已在素材库中')
+    else ElMessage.success('已保存到素材库')
   } catch (error) {
     ElMessage.error(error.message || '保存失败')
   } finally {
@@ -244,6 +250,7 @@ async function runSearch() {
         extra: extra.value
       })
       results.value = list
+      cacheHits(list)
       statusText.value = list.length
         ? `全网检索返回 ${list.length} 条（已过滤违规词）`
         : '未找到公开图片，可改用模型生成教学图标'
@@ -274,6 +281,7 @@ async function runSearch() {
           thumb: svgToDataUrl(svg)
         }
       ]
+      cacheHits(results.value)
       statusText.value = planned.summary || '已生成原创教学图标'
       return
     }
@@ -286,6 +294,7 @@ async function runSearch() {
       extraQueries: planned.queries || []
     })
     results.value = list
+    cacheHits(list)
     statusText.value = list.length
       ? `模型关键词 + 全网检索 ${list.length} 条`
       : '模型给出的关键词未检索到图片，可改为生成教学图标'

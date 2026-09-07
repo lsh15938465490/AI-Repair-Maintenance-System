@@ -22,7 +22,18 @@ export function chunkText(text) {
 
 function tokenize(text) {
   const source = String(text || '').toLowerCase()
-  const tokens = source.match(/[\u4e00-\u9fa5]{2,}|[a-z0-9][a-z0-9._-]{1,}/g) || []
+  const tokens = source.match(/[a-z0-9][a-z0-9._-]{1,}/g) || []
+  const hans = source.match(/[\u4e00-\u9fa5]+/g) || []
+  hans.forEach((run) => {
+    if (run.length <= 2) {
+      tokens.push(run)
+      return
+    }
+    for (let i = 0; i < run.length - 1; i += 1) tokens.push(run.slice(i, i + 2))
+    if (run.length >= 3) {
+      for (let i = 0; i < run.length - 2; i += 1) tokens.push(run.slice(i, i + 3))
+    }
+  })
   return tokens.slice(0, 400)
 }
 
@@ -80,6 +91,52 @@ export function retrieveChunks(documents, extraQuery = '') {
     })
   }
 
+  return picked
+}
+
+export function retrieveChunksByQuery(documents, query, { topK = TOP_K } = {}) {
+  const q = String(query || '').trim()
+  const enabled = (documents || []).filter((doc) => doc.enabled !== false && doc.chunks?.length)
+  if (!q || !enabled.length) return []
+
+  const queryTokens = tokenize(q)
+  if (!queryTokens.length) return []
+  const queryFreq = termFreq(queryTokens)
+  const scored = []
+
+  enabled.forEach((doc) => {
+    doc.chunks.forEach((chunk, index) => {
+      const text = typeof chunk === 'string' ? chunk : chunk.text
+      if (!text) return
+      const tf = termFreq(tokenize(text))
+      let score = 0
+      queryFreq.forEach((qCount, term) => {
+        const cCount = tf.get(term)
+        if (cCount) score += qCount * (1 + Math.log(1 + cCount))
+      })
+      tokenize(doc.name || '').forEach((term) => {
+        if (queryFreq.has(term)) score += 1.5
+      })
+      if (score <= 0) return
+      scored.push({
+        score,
+        text,
+        name: doc.name,
+        index,
+        id: doc.id
+      })
+    })
+  })
+
+  scored.sort((a, b) => b.score - a.score)
+  const picked = []
+  let used = 0
+  for (const item of scored) {
+    if (picked.length >= topK) break
+    if (used + item.text.length > MAX_CONTEXT_CHARS) continue
+    picked.push(item)
+    used += item.text.length
+  }
   return picked
 }
 

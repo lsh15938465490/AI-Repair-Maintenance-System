@@ -3,14 +3,14 @@ export async function getMaterialsFolderInfo() {
     return window.electronAPI.materialsInfo()
   }
   const res = await fetch('/__materials/info')
-  if (!res.ok) throw new Error('无法读取素材文件夹')
+  if (!res.ok) throw new Error('无法读取素材库文件夹')
   return res.json()
 }
 
 export async function saveMaterialToFolder(payload) {
   if (window.electronAPI?.materialsSave) {
     const result = await window.electronAPI.materialsSave(payload)
-    if (!result?.ok) throw new Error(result?.error || '写入素材文件夹失败')
+    if (!result?.ok) throw new Error(result?.error || '写入素材库失败')
     return result
   }
   const res = await fetch('/__materials/save', {
@@ -20,7 +20,7 @@ export async function saveMaterialToFolder(payload) {
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok || data.ok === false) {
-    throw new Error(data.error || '写入素材文件夹失败')
+    throw new Error(data.error || '写入素材库失败')
   }
   return data
 }
@@ -28,7 +28,7 @@ export async function saveMaterialToFolder(payload) {
 export async function updateMaterialFolderMeta(payload) {
   if (window.electronAPI?.materialsMeta) {
     const result = await window.electronAPI.materialsMeta(payload)
-    if (!result?.ok) throw new Error(result?.error || '更新素材文件夹失败')
+    if (!result?.ok) throw new Error(result?.error || '更新素材库失败')
     return result
   }
   const res = await fetch('/__materials/meta', {
@@ -38,7 +38,7 @@ export async function updateMaterialFolderMeta(payload) {
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok || data.ok === false) {
-    throw new Error(data.error || '更新素材文件夹失败')
+    throw new Error(data.error || '更新素材库失败')
   }
   return data
 }
@@ -46,7 +46,7 @@ export async function updateMaterialFolderMeta(payload) {
 export async function removeMaterialFromFolder(id) {
   if (window.electronAPI?.materialsRemove) {
     const result = await window.electronAPI.materialsRemove(id)
-    if (!result?.ok) throw new Error(result?.error || '删除素材文件夹失败')
+    if (!result?.ok) throw new Error(result?.error || '删除素材库失败')
     return result
   }
   const res = await fetch('/__materials/remove', {
@@ -56,7 +56,7 @@ export async function removeMaterialFromFolder(id) {
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok || data.ok === false) {
-    throw new Error(data.error || '删除素材文件夹失败')
+    throw new Error(data.error || '删除素材库失败')
   }
   return data
 }
@@ -65,5 +65,5 @@ export async function openMaterialsFolder() {
   if (window.electronAPI?.materialsOpen) {
     return window.electronAPI.materialsOpen()
   }
-  throw new Error('网页模式请直接在资源管理器中打开项目下的「素材」文件夹')
+  throw new Error('网页模式请直接在资源管理器中打开项目下的 materials 文件夹')
 }

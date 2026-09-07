@@ -2,23 +2,111 @@ const fs = require('fs')
 const path = require('path')
 
 const SLOT_FILES = [
-  { key: 'front', name: '正面' },
-  { key: 'back', name: '反面' },
-  { key: 'schematic', name: '原理图' }
+  { key: 'front', name: 'front' },
+  { key: 'back', name: 'back' },
+  { key: 'schematic', name: 'schematic' }
 ]
+const SLOT_RENAME = { 正面: 'front', 反面: 'back', 原理图: 'schematic' }
+const LEGACY_SLOT_NAMES = [...Object.keys(SLOT_RENAME), ...SLOT_FILES.map((s) => s.name)]
 
-function getMaterialsRoot() {
-  if (process.env.MATERIALS_DIR) return process.env.MATERIALS_DIR
+function getAppParent() {
+  if (process.env.APP_DATA_DIR) return process.env.APP_DATA_DIR
+  let parent = process.cwd()
   try {
     const electron = require('electron')
     const app = electron.app
     if (app?.isPackaged) {
-      return path.join(app.getPath('documents'), 'AI电路板辅助维修系统', '素材')
+      parent = path.join(app.getPath('documents'), 'AI电路板辅助维修系统')
     }
   } catch {
     // vite / node
   }
-  return path.join(process.cwd(), '素材')
+  return parent
+}
+
+function isMostlyEmptyDir(dir) {
+  if (!fs.existsSync(dir)) return true
+  try {
+    return fs.readdirSync(dir).every((name) => name === '.gitkeep' || name.startsWith('.'))
+  } catch {
+    return false
+  }
+}
+
+function mergeMove(from, to) {
+  if (!fs.existsSync(from)) return
+  if (!fs.existsSync(to)) {
+    try {
+      fs.renameSync(from, to)
+    } catch {
+      fs.cpSync(from, to, { recursive: true })
+      fs.rmSync(from, { recursive: true, force: true })
+    }
+    return
+  }
+  const fromStat = fs.statSync(from)
+  const toStat = fs.statSync(to)
+  if (fromStat.isDirectory() && toStat.isDirectory()) {
+    for (const name of fs.readdirSync(from)) {
+      if (name === '.gitkeep' || name.startsWith('.')) continue
+      mergeMove(path.join(from, name), path.join(to, name))
+    }
+    if (isMostlyEmptyDir(from)) fs.rmSync(from, { recursive: true, force: true })
+    return
+  }
+  if (fromStat.isFile() && toStat.isFile()) {
+    fs.rmSync(from, { force: true })
+  }
+}
+
+function moveDirContents(fromDir, toDir) {
+  fs.mkdirSync(toDir, { recursive: true })
+  for (const name of fs.readdirSync(fromDir)) {
+    if (name === '.gitkeep' || name.startsWith('.')) continue
+    mergeMove(path.join(fromDir, name), path.join(toDir, name))
+  }
+}
+
+function renameLegacySlots(dir) {
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return
+  for (const name of fs.readdirSync(dir)) {
+    const child = path.join(dir, name)
+    if (fs.statSync(child).isDirectory()) {
+      renameLegacySlots(child)
+      continue
+    }
+    const parsed = path.parse(name)
+    const nextBase = SLOT_RENAME[parsed.name]
+    if (!nextBase) continue
+    const dest = path.join(dir, `${nextBase}${parsed.ext}`)
+    if (!fs.existsSync(dest)) fs.renameSync(child, dest)
+    else fs.unlinkSync(child)
+  }
+}
+
+function resolveNamedRoot(englishName, legacyNames = []) {
+  const parent = getAppParent()
+  const next = path.join(parent, englishName)
+  fs.mkdirSync(next, { recursive: true })
+  for (const name of legacyNames) {
+    const legacy = path.join(parent, name)
+    if (!fs.existsSync(legacy) || isMostlyEmptyDir(legacy)) continue
+    try {
+      moveDirContents(legacy, next)
+      if (isMostlyEmptyDir(legacy)) {
+        fs.rmSync(legacy, { recursive: true, force: true })
+      }
+    } catch {
+      // keep writing to English folder even if leftover Chinese dir remains
+    }
+  }
+  renameLegacySlots(next)
+  return next
+}
+
+function getMaterialsRoot() {
+  if (process.env.MATERIALS_DIR) return process.env.MATERIALS_DIR
+  return resolveNamedRoot('materials', ['素材库', '素材'])
 }
 
 function ensureRoot() {
@@ -85,10 +173,9 @@ function writeMeta(dir, payload) {
 }
 
 function clearSlotImages(dir) {
-  const names = SLOT_FILES.map((slot) => slot.name)
   for (const file of fs.readdirSync(dir)) {
     const base = path.parse(file).name
-    if (names.includes(base)) fs.unlinkSync(path.join(dir, file))
+    if (LEGACY_SLOT_NAMES.includes(base)) fs.unlinkSync(path.join(dir, file))
   }
 }
 
@@ -128,10 +215,14 @@ function info() {
 }
 
 module.exports = {
+  getAppParent,
   getMaterialsRoot,
   ensureRoot,
   saveSet,
   updateMeta,
   removeSet,
-  info
+  info,
+  decodeImage,
+  mimeToExt,
+  safeId
 }
